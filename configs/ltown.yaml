@@ -1,0 +1,32 @@
+# Network config: L-Town (BattLeDIM 2020)
+network: ltown
+nominal_inp: data/raw/ltown/L-TOWN.inp
+real_inp: data/raw/ltown/L-TOWN_Real.inp      # official truth model; falls back to perturbed nominal if missing
+step_s: 300                                   # hydraulic + pattern step
+report_step_s: 900                            # stored time series resolution (15 min)
+
+# Sensor locations that actually exist in L-Town (layouts for k=3/5/10 are drawn from these)
+pressure_candidates: [n1, n4, n31, n54, n105, n114, n163, n188, n215, n229, n288, n296, n332, n342, n410, n415,
+                      n429, n458, n469, n495, n506, n516, n519, n549, n613, n636, n644, n679, n722, n726, n740,
+                      n752, n769]
+flow_links: [p227, p235, PUMP_1]              # inlet flows (zone A x2, zone C pump)
+tank_levels: [T1]
+amr_nodes_zone: C                             # 82 household smart meters are in zone C
+
+signatures:
+  sizes_lps: [1.0, 3.0, 6.0]                  # target leak flow at the node's nominal pressure
+  windows_h: {night: [2, 4], day: [10, 12]}
+  duration_h: 40                              # leak on from t=0; windows read on the 2nd day (must cover 24+12 h)
+  weekday_offset_days: 2
+
+truth:
+  source: real                                # v2: official L-TOWN_Real.inp (time-sliced); "perturbed" = v1
+  real_cache: data/cache/ltown_real.npz       # built by scripts/build/prepare_real_model.py
+  perturb: {rough_pct: 0.10, diam_pct: 0.05, demand_pct: 0.10}   # only used when source = perturbed (v1)
+  demand_noise: {sigma: 0.08, rho: 0.97}                         # only used when source = perturbed (v1)
+
+observation_noise: field                      # field | battledim_exact | harsh | v1_perturbed (agentix/env/observe.py)
+signature_cache: data/cache/ltown_signatures.npz
+
+# sensors that can develop a fault in suite S5 (union of the evaluated layouts, so faults are visible)
+fault_sensor_pool: ['n1', 'n215', 'n296', 'n332', 'n410', 'n458', 'n469', 'n495', 'n516', 'n613', 'n644', 'n679', 'n752']
