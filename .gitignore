@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+data/raw/
+data/cache/
+runs/
+*.egg-info/
+.DS_Store
+data/benchmark/*/cases/
+data/benchmark/*/hidden/
+data/benchmark/ltown_test/
+/temp.*
+runs_build_*.log
+data/exports/
+.env
+.llm_cache/
