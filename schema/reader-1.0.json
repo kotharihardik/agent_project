@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "reader-1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version","report_id","is_water_supply_issue","not_supply_reason","issue_scope","symptoms",
+               "location","time","severity","hazards","reporter_certainty","mentions_previous_report",
+               "contains_instructions","language","summary_en"],
+  "properties": {
+    "schema_version": {"const": "reader-1.0"},
+    "report_id": {"type": "string"},
+    "is_water_supply_issue": {"type": "boolean"},
+    "not_supply_reason": {"enum": [null,"sewage","rain_or_drain","private_tank_or_plumbing","not_water_related","other"]},
+    "issue_scope": {"enum": ["public_network","inside_property","unclear"]},
+    "symptoms": {"type": "array", "uniqueItems": true, "items": {"enum": [
+      "water_on_surface","burst_gushing","wet_patch","pooling_water","low_pressure","no_water",
+      "sound_of_water","road_damage","dirty_water","meter_or_valve_leak","other"]}},
+    "location": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mentions","locality","is_source_seen","flow_direction_text","precision"],
+      "properties": {
+        "mentions": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["text","type","relation"],
+          "properties": {
+            "text": {"type": "string"},
+            "type": {"enum": ["street","landmark","junction","locality","house_number","distance_hint","other"]},
+            "relation": {"enum": ["at","near","opposite","behind","next_to","in_front_of","between","on","towards","unknown"]}}}},
+        "locality": {"type": ["string","null"]},
+        "is_source_seen": {"enum": ["yes","no","unknown"]},
+        "flow_direction_text": {"type": ["string","null"]},
+        "precision": {"enum": ["exact_spot","street","area","none"]}}},
+    "time": {
+      "type": "object", "additionalProperties": false,
+      "required": ["onset_text","onset_kind","onset_value","is_ongoing"],
+      "properties": {
+        "onset_text": {"type": ["string","null"]},
+        "onset_kind": {"enum": ["ago","clock","day_part","date","unknown"]},
+        "onset_value": {"type": ["string","null"]},
+        "is_ongoing": {"type": ["boolean","null"]}}},
+    "severity": {"enum": ["low","medium","high","unknown"]},
+    "hazards": {"type": "array", "uniqueItems": true, "items": {"enum": [
+      "traffic_risk","road_cave_in","electric_risk","flooding_property","contamination_risk","other"]}},
+    "reporter_certainty": {"enum": ["certain","unsure"]},
+    "mentions_previous_report": {"type": "boolean"},
+    "contains_instructions": {"type": "boolean"},
+    "language": {"enum": ["en","hi","te","hi-en","te-en","other"]},
+    "summary_en": {"type": "string", "maxLength": 200}
+  }
+}
