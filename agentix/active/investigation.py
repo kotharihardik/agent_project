@@ -45,8 +45,18 @@ class Option:
 
 class Investigation:
     def __init__(self, engine: EvidenceEngine, reader, gaz, seed: int = 0, n_samples: int = 24, taint: bool = False,
-                 operator: bool = True):
+                 operator: bool = True, acoustic_r: float = 250.0, lookahead: bool = True):
         self.eng, self.reader, self.gaz = engine, reader, gaz
+        # listening radius: the equipment allows up to 250 m (configs/costs.yaml). Phase 2/3 used 150 m, which left
+        # half of the reachable leaks outside every listening area (Phase 4 diagnosis); 150 reproduces old runs.
+        self.acoustic_r = acoustic_r
+        # score checks by "chance of success after this check AND one listening survey" (one-step look-ahead),
+        # not only "chance a dig succeeds right after this check" (myopic: under-values step tests that narrow
+        # the area). False reproduces Phase 2/3.
+        self.lookahead = lookahead
+        # temporary pressure loggers: a 1 L/s leak lowers pressure ~0.04 m, below logger error (Phase 4), so the
+        # real agent's toolbox leaves them out (False); kept on for the older methods as they were
+        self.use_loggers = True
         self.use_operator = operator          # False = Phase-2 setting: approval is automatic once code decides
         self.taint = taint                    # Phase 3 defence against coordinated fake reports (see _taint)
         self.net, self.rep = engine.net, engine.rep
@@ -54,6 +64,8 @@ class Investigation:
         self.rng = np.random.default_rng(seed)
         self.n_samples = n_samples
         self.D = self.net.pipe_distance
+        self.listen = (self.D <= acoustic_r).astype(float)      # which junctions one listening survey covers
+        self.step_sets = np.argsort(self.D, axis=1)[:, :60]      # a step test isolates the 60 junctions nearest a centre
 
     # ================================================================== start
     def start(self, case, env) -> EvidenceBoard:
@@ -140,17 +152,30 @@ class Investigation:
             c = int(np.argmax(b.cover @ p))
             plan.append(c)
             p = p * (1 - b.cover[c])
-        for i, c in enumerate(plan[:3]):
-            opts.append(Option(f"acoustic@{self.net.junctions[c]}", "acoustic", {"c": c, "R": 150.0},
-                               COSTS["acoustic"], DELAY_H["acoustic"], label=f"listen to pipes within 150 m of {self._name(c)}"))
-        order = np.argsort(self.D[plan[0]])
-        cum = np.cumsum(b.post[order])
-        for frac in (0.35, 0.6):
-            k = int(min(np.searchsorted(cum, frac) + 1, 60))
-            opts.append(Option(f"step{int(frac * 100)}@{self.net.junctions[plan[0]]}", "step", {"S": order[:k]},
-                               COSTS["step"], DELAY_H["step"],
-                               label=f"night step test isolating {k} junctions around {self._name(plan[0])}"))
-        for n in np.argsort(-b.post)[:4]:
+        R, p = self.acoustic_r, b.post.copy()
+        for _ in range(3):                                    # listening areas: most belief within R, no overlap
+            c = int(np.argmax(self.listen @ p))
+            opts.append(Option(f"acoustic@{self.net.junctions[c]}", "acoustic", {"c": c, "R": R},
+                               COSTS["acoustic"], DELAY_H["acoustic"],
+                               label=f"listen to pipes within {R:.0f} m of {self._name(c)}"))
+            p = p * (1 - self.listen[c])
+        if self.lookahead:                                    # step tests: the 60-junction blocks holding most belief
+            p = b.post.copy()
+            for _ in range(2):
+                c = int(np.argmax(p[self.step_sets].sum(1)))
+                S = self.step_sets[c]
+                opts.append(Option(f"step@{self.net.junctions[c]}", "step", {"S": S}, COSTS["step"], DELAY_H["step"],
+                                   label=f"night step test isolating {len(S)} junctions around {self._name(c)}"))
+                p[S] = 0.0
+        else:                                                 # Phase 2/3 design (kept to reproduce old runs)
+            order = np.argsort(self.D[plan[0]])
+            cum = np.cumsum(b.post[order])
+            for frac in (0.35, 0.6):
+                k = int(min(np.searchsorted(cum, frac) + 1, 60))
+                opts.append(Option(f"step{int(frac * 100)}@{self.net.junctions[plan[0]]}", "step", {"S": order[:k]},
+                                   COSTS["step"], DELAY_H["step"],
+                                   label=f"night step test isolating {k} junctions around {self._name(plan[0])}"))
+        for n in (np.argsort(-b.post)[:4] if self.use_loggers else []):
             name = self.net.junctions[int(n)]
             if name in self.state["loggers"]:
                 continue
@@ -173,16 +198,27 @@ class Investigation:
         return (lm["name"] if lm else "") + (" on " if lm and st else "") + (st["name"] if st else "") or self.net.junctions[j]
 
     # ================================================================== value of information
+    def value(self, board: EvidenceBoard) -> float:
+        """How good a board is for finishing the job: the better of 'dig now' and 'listen at the best area, then
+        dig where it is heard' (one-step look-ahead with our own acoustic model; ~85 % of heard leaks are then dug
+        within range). With lookahead off, only 'dig now' counts (the Phase 2/3 myopic score)."""
+        b = board.belief()
+        p_dig = b.best_dig()[1]
+        if not self.lookahead:
+            return p_dig
+        p_listen = b.p_leak * float(np.max(self.listen @ b.post)) * ACOUSTIC_P_DETECT * 0.85
+        return max(p_dig, p_listen)
+
     def expected_gain(self, opt: Option, board: EvidenceBoard) -> float:
-        """Expected increase of P(success) after seeing the result (Monte Carlo over possible results)."""
+        """Expected increase of the board's value after seeing the result (Monte Carlo over possible results)."""
         b0 = board.belief()
-        now = b0.best_dig()[1]
+        now = self.value(board)
         vals = []
         for _ in range(self.n_samples):
             j = int(self.rng.choice(len(b0.post), p=b0.post)) if self.rng.random() < b0.p_leak else -1
             nb = board.copy()
             self._apply(opt, self._simulate(opt, j, board), nb)
-            vals.append(nb.belief().best_dig()[1])
+            vals.append(self.value(nb))
         return float(np.mean(vals) - now)
 
     def _simulate(self, opt: Option, j: int, board: EvidenceBoard) -> dict:
@@ -285,6 +321,8 @@ class Investigation:
             raise ValueError(opt.kind)
         if out:
             self._apply(opt, out, board)
+            self.state["spent"] += opt.cost
+        elif str(r.get("error", "")).startswith("field check failed"):   # robustness suite: the night was paid for
             self.state["spent"] += opt.cost
         self.state["history"].append({"t_h": round((env.now - self.case.case_open_s) / 3600, 1), "action": opt.oid,
                                       "ok": bool(r.get("ok")), "error": r.get("error")})
