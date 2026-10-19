@@ -21,8 +21,10 @@ INTENTS = {
 
 
 class ReporterSimulator:
-    def __init__(self, net, places: dict, rng: np.random.Generator):
+    def __init__(self, net, places: dict, rng: np.random.Generator, realistic: bool = False):
         self.net, self.rng = net, rng
+        self.realistic = realistic                  # name places the way people really do (text_variants.py)
+        self.avoid = {a.lower() for p in places.values() for a in [p["name"]] + list(p.get("aliases", []))}
         self.landmarks = [p for p in places.values() if p["type"] == "landmark"]
         self.lm_xy = np.array([net.xy[net.index[p["geometry"]["node"]]] for p in self.landmarks])
         self.street_of = {}
@@ -37,6 +39,12 @@ class ReporterSimulator:
         d = np.hypot(*(self.lm_xy - self.net.xy[self.net.index[node]]).T)
         i = int(np.argmin(d))
         return self.landmarks[i]["name"] if d[i] <= max_m else None
+
+    def _say(self, name: str, report: dict) -> str:
+        if not self.realistic:
+            return name
+        from .text_variants import variant
+        return variant(name, f"reply|{report['report_id']}", avoid=self.avoid)[0]
 
     def _intents(self, q: str) -> list[str]:
         q = q.lower()
@@ -56,10 +64,10 @@ class ReporterSimulator:
                 parts.append(self._answer_source(report, leak))
             elif intent == "street":
                 st = self.street_of.get(seen)
-                parts.append(f"It is on {st}." if st else "I don't know the street name.")
+                parts.append(f"It is on {self._say(st, report)}." if st else "I don't know the street name.")
             elif intent == "landmark":
                 lm = self._nearest_landmark(seen)
-                parts.append(f"It is near {lm}." if lm else "There is no big landmark nearby.")
+                parts.append(f"It is near {self._say(lm, report)}." if lm else "There is no big landmark nearby.")
         if not parts:
             return "Sorry, I don't understand. I just saw water there."
         return " ".join(parts)
@@ -96,5 +104,5 @@ class ReporterSimulator:
         if self.rng.random() < 0.6 and leak.get("surface_node"):
             up = self._nearest_landmark(leak["surface_node"], 200) or self.street_of.get(leak["surface_node"])
             if up:
-                return f"It is not coming out here, it is flowing down from the side of {up}."
+                return f"It is not coming out here, it is flowing down from the side of {self._say(up, report)}."
         return "It is collected here, it seems to flow from somewhere uphill."

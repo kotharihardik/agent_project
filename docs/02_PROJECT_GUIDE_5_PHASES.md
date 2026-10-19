@@ -397,6 +397,6 @@ agentix/
 | 1 Foundations | Done (2026-10-09), except teammate sign-off + official Real model | ADR-001, 002, 003, 004 | Environment, calibrated noise, gazetteer, report generator, 530-case benchmark; see `docs/phase1/PHASE1_REPORT.md` and `docs/LEARNING_LOG.md` |
 | 2 Inference engine + RQ1 baselines | Done (2026-10-11) | ADR-005, 006, 007, 008 | Official truth (bench v2), evidence engine, 7 static + 6 active baselines, budgeted VOI policy; see `docs/phase2/PHASE2_REPORT.md` |
 | 3 Agent + RAG + safety | Done (2026-10-11) | ADR-009, 010, 011 | Safe toolbox (action selector, code gate, operator token, SOP in code, taint), LLM planner (plan-then-execute, abduction, critic), rule brain, ReAct/one-shot baselines, held-out document wording; test: 0 unsafe vs ReAct 4 trap digs, AgentiX most careful but finds fewer leaks than rules. See `docs/phase3/PHASE3_REPORT.md` |
-| 4 Full evaluation | Not started | | |
+| 4 Full evaluation | Part 1 done (2026-10-16): bottleneck found and fixed, fresh test | ADR-012 | Coarse-to-fine search, 250 m listening, 80 % dig bar, crews setting, AgentiX v2 (code search + LLM analyst + critic). Fresh 204-case test (3 crews): localization 36.8 → 53.5 %, false dig rate 51.7 → 17.6 %, 0 unsafe; unfamiliar wording: AI 39 % vs rules 11 % (p = 3e-5). Still open: real BattLeDIM leaks, second network, two-leak / tool-failure / equity suites, real teammate reader, pass^k, Holm. See `docs/phase4/PHASE4_REPORT.md` |
 | 5 Analysis + write-up | Not started | | |
 | Fine-tune track | Not started | | Owner: teammate (see 03) |

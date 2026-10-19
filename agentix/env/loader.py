@@ -33,9 +33,20 @@ def list_cases(bench_dir: str, prefix: str = "") -> list[str]:
     return sorted(os.path.basename(d) for d in glob.glob(f"{bench_dir}/cases/{prefix}*"))
 
 
-def load_public_case(bench_dir: str, internal_id: str, layout: list[str]) -> PublicCase:
+def realistic_texts(case_dir: str) -> dict[str, str]:
+    """report_id -> realistic-language text (scripts/build/build_realistic_reports.py), or {} if not built."""
+    p = f"{case_dir}/reports_realistic.json"
+    return {rid: v["text"] for rid, v in json.load(open(p)).items()} if os.path.exists(p) else {}
+
+
+def load_public_case(bench_dir: str, internal_id: str, layout: list[str], text_variant: str | None = None) -> PublicCase:
     d = f"{bench_dir}/cases/{internal_id}"
     case = json.load(open(f"{d}/case.json"))
+    if text_variant == "realistic":                  # same reports, written the way real people write
+        alt = realistic_texts(d)
+        if not alt:
+            raise FileNotFoundError(f"no realistic reports built for {internal_id}")
+        case["reports"] = [{**r, "text": alt.get(r["report_id"], r["text"])} for r in case["reports"]]
     obs = np.load(f"{d}/obs.npz")
     nodes = list(obs["pressure_nodes"])
     missing = [n for n in layout if n not in nodes]

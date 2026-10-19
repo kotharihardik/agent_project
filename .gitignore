@@ -14,3 +14,4 @@ runs_build_*.log
 data/exports/
 .env
 .llm_cache/
+.llm_cache_citizen/

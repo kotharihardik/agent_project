@@ -4,6 +4,16 @@
 > **Rule:** at the start of each phase, read this file. Tick items when done, and add new ones as they appear.
 > Phase map: **2** = leak-search engine (no LLM) · **3** = reasoning + agent + hypotheses + tools + RAG + safety · **4** = full testing · **5** = analysis + paper.
 
+## Status in Phase 4 (2026-10-16)
+- **N1, N5, N6, N7, N14, N17 addressed** by the coarse-to-fine search (ADR-012): step tests now drive the search,
+  the policy keeps a listening reserve, and the AI no longer plans field checks (code does), so it cannot give up
+  early.
+- **N10 partly addressed:** the 80 % dig bar removes most single-false-alarm digs.
+- **N16 done:** a fresh 204-case test set with no Phase-3 overlap (120 new S5 cases).
+- New: **N19** the inform-reporters audit counts a violation when a case had no reports at all (0.02 per case,
+  same for all methods); fix the rule wording in Phase 5. **N20** hidden leaks remain the frontier (~28 % found);
+  more budget or sensors are the levers, shown in the sensitivity analysis.
+
 ## Status after Phase 3 (2026-10-11)
 
 ### Done in Phase 3

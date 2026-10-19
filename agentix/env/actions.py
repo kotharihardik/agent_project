@@ -28,13 +28,26 @@ def case_seed(case_id: str, layout_name: str) -> int:
 
 class CaseEnv:
     def __init__(self, bench_dir: str, case_id: str, net: NetworkInfo, layout: list[str], costs_yaml: str,
-                 gazetteer: dict, seed: int = 0, noise: SensorNoise | None = None):
+                 gazetteer: dict, seed: int = 0, noise: SensorNoise | None = None, crews_per_night: int | None = None,
+                 text_variant: str | None = None, citizen: str = "template", crn: bool = False,
+                 tool_fail: float = 0.0, acoustic_fp: float | None = None):
         self.net, self.layout = net, list(layout)
         self.case = json.load(open(f"{bench_dir}/cases/{case_id}/case.json"))
         self._hid = json.load(open(f"{bench_dir}/hidden/{case_id}.json"))
         self._arr = np.load(f"{bench_dir}/hidden/{case_id}.npz")
         self.costs = yaml.safe_load(open(costs_yaml))
+        # how many field checks (listening, logger, step test) can run in the same night = night crews available
+        self.crews = int(crews_per_night or self.costs.get("crews_per_night", 1))
+        self._last_night, self._night_used = None, {}
         self.rng = np.random.default_rng(seed)
+        # common random numbers (evaluation fairness): with crn=True the luck of each check depends only on WHICH
+        # check it is (case, kind, target, how many times it was repeated), not on what was done before, so two
+        # methods that run the same check get the same answer
+        self.seed, self.crn, self._crn_n = seed, crn, {}
+        self.tool_fail = tool_fail   # robustness suite: share of night field checks that fail (night and cost used)
+        # robustness suite: noisy streets - the true false-alarm rate of listening is higher than the methods'
+        # evidence model assumes (costs.yaml false_positive); None = as configured
+        self.acoustic_fp = acoustic_fp
         self.noise = noise or SensorNoise()
         self.now = float(self.case["case_open_s"])
         self.horizon = float(self.case["horizon_s"])
@@ -45,11 +58,55 @@ class CaseEnv:
         self._pnodes = list(np.load(f"{bench_dir}/cases/{case_id}/obs.npz")["pressure_nodes"])
         ev = self._hid["ground_truth"]["events"]
         self._leak = ev[0] if ev else None
-        self.reporter = ReporterSimulator(net, self.places, self.rng)
+        self.text_variant = text_variant
+        if text_variant == "realistic":              # reports written the way real people write (same truth)
+            from .loader import realistic_texts
+            alt = realistic_texts(f"{bench_dir}/cases/{case_id}")
+            for r in self._hid["reports_all"]:
+                r["text"] = alt.get(r["report_id"], r["text"])
+        if citizen == "talking":                     # answers any follow-up question (env/citizen_llm.py)
+            from .citizen_llm import TalkingCitizen
+            self.reporter = TalkingCitizen(net, self.places, self.rng, realistic=(text_variant == "realistic"))
+        else:
+            self.reporter = ReporterSimulator(net, self.places, self.rng, realistic=(text_variant == "realistic"))
         self.operator = Operator()
         self.permits: set[str] = set()
         self.notified: list[str] = []
         self.start_dt = dt.datetime.fromisoformat(self.case["start_datetime"])
+
+    def drop_false_reports(self, keep: float) -> set[str]:
+        """Experiment setting (harness only): keep each false-alarm / low-pressure message with probability `keep`
+        (fixed per message, so every method sees the same messages). Returns the ids removed."""
+        if keep >= 1.0:
+            return set()
+        gone = {r["report_id"] for r in self._hid["reports_all"]
+                if r["truth"]["kind"] in ("false", "complaint_background")
+                and zlib.crc32(f"keep|{r['report_id']}|{self.case['case_id']}".encode()) % 1000 >= keep * 1000}
+        self._hid["reports_all"] = [r for r in self._hid["reports_all"] if r["report_id"] not in gone]
+        return gone
+
+    def _r(self, kind: str, key: str) -> np.random.Generator:
+        if not self.crn:
+            return self.rng
+        k = f"{kind}|{key}"
+        n = self._crn_n[k] = self._crn_n.get(k, 0) + 1
+        return np.random.default_rng(zlib.crc32(f"{self.seed}|{self.case['case_id']}|{k}|{n}".encode()))
+
+    FAIL_REASONS = ["the valve on the block boundary would not close, test aborted",
+                    "the listening equipment failed (battery), no result", "heavy traffic noise all night, no result",
+                    "the crew was called away to a burst elsewhere", "the meter logger lost its data"]
+
+    def _failed(self, kind: str, key: str, args: dict, cost: float):
+        """Robustness suite: did tonight's field check fail? (The night and the cost are used, as in real life.)"""
+        if self.tool_fail <= 0:
+            return None
+        r = np.random.default_rng(zlib.crc32(f"fail|{self.seed}|{self.case['case_id']}|{kind}|{key}|"
+                                             f"{self._crn_n.get('fail|' + kind + key, 0)}".encode()))
+        self._crn_n["fail|" + kind + key] = self._crn_n.get("fail|" + kind + key, 0) + 1
+        if r.random() >= self.tool_fail:
+            return None
+        reason = self.FAIL_REASONS[int(r.integers(len(self.FAIL_REASONS)))]
+        return self._record(kind, args, {"ok": False, "error": f"field check failed: {reason}", "now_s": self.now}, cost)
 
     def clock(self, t_s: float | None = None) -> dt.datetime:
         """Wall-clock time of the case at t_s seconds (default: now)."""
@@ -68,9 +125,21 @@ class CaseEnv:
         d = math.floor((self.now - 4 * 3600) / 86400) + 1
         return d * 86400 + 5 * 3600, d
 
+    def _night_slot(self):
+        """When the next field check can run. Checks run at night. With several crews, a check asked for right after
+        a night's results came in runs in that same night (another crew), until all crews of that night are used."""
+        if self._last_night is not None and self.now == self._last_night[0] \
+                and self._night_used.get(self._last_night[1], 0) < self.crews:
+            return self._last_night
+        return self._next_night_end()
+
+    def _use_night(self, slot):
+        self._last_night = slot
+        self._night_used[slot[1]] = self._night_used.get(slot[1], 0) + 1
+
     def night_left(self) -> bool:
-        """Is there still a night (field checks run at night) before the case horizon?"""
-        return self._next_night_end()[0] <= self.horizon
+        """Is there still a night slot (field checks run at night) before the case horizon?"""
+        return self._night_slot()[0] <= self.horizon
 
     def leak_distance_m(self, node: str) -> float:
         """Pipe distance from a junction to the true leak point (inf if no leak)."""
@@ -135,12 +204,13 @@ class CaseEnv:
             return self._err("place_logger", args, f"unknown node '{node}'")
         if len(self.loggers) >= self.costs["max_loggers_per_case"]:
             return self._err("place_logger", args, "logger limit reached")
-        t_end, d = self._next_night_end()
+        t_end, d = self._night_slot()
         nm = self._arr["night_mean_pressure"]
         if t_end > self.horizon or d >= nm.shape[0]:
             return self._err("place_logger", args, "no night left before horizon")
         self.now = t_end
-        val = logger_reading(float(nm[d, self.net.index[node]]), self.rng, self.noise)
+        self._use_night((t_end, d))
+        val = logger_reading(float(nm[d, self.net.index[node]]), self._r("logger", node), self.noise)
         self.loggers[node] = {"night_day": d, "night_mean_m": val}
         return self._record("place_logger", args, {"ok": True, "node": node, "night_mean_pressure_m": val,
                                                     "window": "02:00-04:00", "now_s": self.now},
@@ -163,10 +233,13 @@ class CaseEnv:
         if asked_before >= 2:                      # don't pester citizens: at most two questions per report
             return self._err("ask_reporter", args, "this reporter was already asked twice")
         c = self.costs["ask_reporter"]
-        delay = self.rng.uniform(*c["delay_h"]) * 3600
+        rng = self._r("ask", report_id)
+        delay = rng.uniform(*c["delay_h"]) * 3600
         self.now = min(self.now + delay, self.horizon)
-        if self.rng.random() > c["response_prob"]:
+        if rng.random() > c["response_prob"]:
             return self._record("ask_reporter", args, {"ok": True, "reply_text": None, "note": "no reply"})
+        if self.crn:
+            self.reporter.rng = rng
         reply = self.reporter.answer(rep, self._leak, question, options)
         return self._record("ask_reporter", args, {"ok": True, "reply_text": reply, "now_s": self.now})
 
@@ -177,23 +250,29 @@ class CaseEnv:
             return self._err("acoustic_survey", args, f"unknown node '{center_node}'")
         if radius_m <= 0 or radius_m > c["max_radius_m"]:
             return self._err("acoustic_survey", args, f"radius must be in (0, {c['max_radius_m']}]")
-        t_end, d = self._next_night_end()
+        t_end, d = self._night_slot()
         if t_end > self.horizon:
             return self._err("acoustic_survey", args, "no night left before horizon")
         self.now = t_end
+        self._use_night((t_end, d))
+        f = self._failed("acoustic_survey", center_node, args, c["cost"])
+        if f is not None:
+            return f
         d_leak = self.leak_distance_m(center_node)
+        rng = self._r("acoustic", center_node)
         q = float(self._leak["mean_flow_lps_after_start"]) if self._leak else 0.0
         p_det = min(c["p_detect_max"], c["p_detect_1lps"] * math.sqrt(max(q, 0.01)))
-        detected = (d_leak <= radius_m and self.rng.random() < p_det) or self.rng.random() < c["false_positive"]
+        fp = c["false_positive"] if self.acoustic_fp is None else self.acoustic_fp
+        detected = (d_leak <= radius_m and rng.random() < p_det) or rng.random() < fp
         res = {"ok": True, "detected": bool(detected), "now_s": self.now}
         if detected and d_leak <= radius_m:
             near = self.net.index[self._leak["nearest_node"]]
-            offset = abs(self.rng.normal(0, c["locate_sigma_m"]))
+            offset = abs(rng.normal(0, c["locate_sigma_m"]))
             dist = self.net.pipe_distance[near]
             res["approx_node"] = self.net.junctions[int(np.argmin(np.abs(dist - offset)))]
         elif detected:  # false positive somewhere in the surveyed area
             ring = np.where(self.net.pipe_distance[self.net.index[center_node]] <= radius_m)[0]
-            res["approx_node"] = self.net.junctions[int(self.rng.choice(ring))]
+            res["approx_node"] = self.net.junctions[int(rng.choice(ring))]
         return self._record("acoustic_survey", args, res, c["cost"])
 
     def step_test(self, nodes: list[str], approved: bool = False, approval_token: str | None = None):
@@ -206,14 +285,18 @@ class CaseEnv:
         bad = [n for n in nodes if n not in self.net.index]
         if bad or not nodes or len(nodes) > c["max_nodes"]:
             return self._err("step_test", args, f"invalid node set (unknown={bad[:3]}, size={len(nodes)})")
-        t_end, d = self._next_night_end()
+        t_end, d = self._night_slot()
         if t_end > self.horizon:
             return self._err("step_test", args, "no night left before horizon")
         self.now = t_end
+        self._use_night((t_end, d))
+        f = self._failed("step_test", ",".join(sorted(nodes)), args, c["cost"])
+        if f is not None:
+            return f
         inside = bool(self._leak and self._leak["nearest_node"] in set(nodes))
         q = float(self._leak["mean_flow_lps_after_start"]) if (self._leak and inside) else 0.0
         night_dem = float(sum(self.net.base_demand[self.net.index[n]] for n in nodes) * 1000 * 0.4)
-        measured = night_dem + q + self.rng.normal(0, c["flow_noise_lps"])
+        measured = night_dem + q + self._r("step", ",".join(sorted(nodes))).normal(0, c["flow_noise_lps"])
         return self._record("step_test", args, {"ok": True, "inflow_drop_lps": round(measured, 2),
                                                  "expected_customer_drop_lps": round(night_dem, 2),
                                                  "now_s": self.now}, c["cost"])
